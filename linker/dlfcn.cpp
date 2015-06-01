@@ -70,6 +70,16 @@ void* dlopen(const char* filename, int flags) {
   return result;
 }
 
+void* dlopen_in_sandbox(const char* filename, int flags, const void* sandbox) {
+  ScopedPthreadMutexLocker locker(&gDlMutex);
+  soinfo* result = do_dlopen_in_sandbox(filename, flags, sandbox);
+  if (result == NULL) {
+    __bionic_format_dlerror("dlopen failed", linker_get_error_buffer());
+    return NULL;
+  }
+  return result;
+}
+
 void* dlsym(void* handle, const char* symbol) {
   ScopedPthreadMutexLocker locker(&gDlMutex);
 
@@ -149,13 +159,13 @@ int dlclose(void* handle) {
 //   0000000 00011111 111112 22222222 2333333 3333444444444455555555556666666 6667
 //   0123456 78901234 567890 12345678 9012345 6789012345678901234567890123456 7890
 #define ANDROID_LIBDL_STRTAB \
-    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dl_unwind_find_exidx\0"
+    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dl_unwind_find_exidx\0"
 
 #elif defined(ANDROID_X86_LINKER) || defined(ANDROID_MIPS_LINKER)
 //   0000000 00011111 111112 22222222 2333333 3333444444444455555555556666666 6667
 //   0123456 78901234 567890 12345678 9012345 6789012345678901234567890123456 7890
 #define ANDROID_LIBDL_STRTAB \
-    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dl_iterate_phdr\0"
+    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dl_iterate_phdr\0"
 #else
 #error Unsupported architecture. Only ARM, MIPS, and x86 are presently supported.
 #endif
@@ -181,10 +191,11 @@ static Elf32_Sym gLibDlSymtab[] = {
   ELF32_SYM_INITIALIZER(21, &dlerror, 1),
   ELF32_SYM_INITIALIZER(29, &dladdr, 1),
   ELF32_SYM_INITIALIZER(36, &android_update_LD_LIBRARY_PATH, 1),
+  ELF32_SYM_INITIALIZER(67, &dlopen_in_sandbox, 1),
 #if defined(ANDROID_ARM_LINKER)
-  ELF32_SYM_INITIALIZER(67, &dl_unwind_find_exidx, 1),
+  ELF32_SYM_INITIALIZER(85, &dl_unwind_find_exidx, 1),
 #elif defined(ANDROID_X86_LINKER) || defined(ANDROID_MIPS_LINKER)
-  ELF32_SYM_INITIALIZER(67, &dl_iterate_phdr, 1),
+  ELF32_SYM_INITIALIZER(85, &dl_iterate_phdr, 1),
 #endif
 };
 
@@ -207,7 +218,7 @@ static Elf32_Sym gLibDlSymtab[] = {
 // Note that adding any new symbols here requires
 // stubbing them out in libdl.
 static unsigned gLibDlBuckets[1] = { 1 };
-static unsigned gLibDlChains[8] = { 0, 2, 3, 4, 5, 6, 7, 0 };
+static unsigned gLibDlChains[9] = { 0, 2, 3, 4, 5, 6, 7, 8, 0 };
 
 // This is used by the dynamic linker. Every process gets these symbols for free.
 soinfo libdl_info = {
@@ -224,7 +235,7 @@ soinfo libdl_info = {
     symtab: gLibDlSymtab,
 
     nbucket: 1,
-    nchain: 8,
+    nchain: 9,
     bucket: gLibDlBuckets,
     chain: gLibDlChains,
 

@@ -26,6 +26,8 @@ int dlclose(void *handle) { return 0; }
 
 void android_update_LD_LIBRARY_PATH(const char* ld_library_path) { }
 
+void *dlopen_in_sandbox(const char *filename, int flag, const void *sandbox) { return 0; }
+
 #if defined(__arm__)
 
 void *dl_unwind_find_exidx(void *pc, int *pcount) { return 0; }

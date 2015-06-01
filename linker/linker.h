@@ -175,6 +175,7 @@ struct soinfo {
 };
 
 extern soinfo libdl_info;
+extern void* next_mmap_offset;
 
 // These aren't defined in <sys/exec_elf.h>.
 #ifndef DT_PREINIT_ARRAY
@@ -186,6 +187,7 @@ extern soinfo libdl_info;
 
 void do_android_update_LD_LIBRARY_PATH(const char* ld_library_path);
 soinfo* do_dlopen(const char* name, int flags);
+soinfo* do_dlopen_in_sandbox(const char* name, int flags, const void* sandbox);
 int do_dlclose(soinfo* si);
 
 Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start);

@@ -72,6 +72,7 @@
  *   and NOEXEC
  */
 
+void* next_mmap_offset;
 static bool soinfo_link_image(soinfo* si);
 
 // We can't use malloc(3) in the dynamic linker. We use a linked list of anonymous
@@ -286,6 +287,35 @@ static bool ensure_free_list_non_empty() {
   return true;
 }
 
+static bool ensure_free_list_non_empty_sandbox(const void* addr) {
+  if (gSoInfoFreeList != NULL) {
+    return true;
+  }
+
+  // Allocate a new pool.
+  soinfo_pool_t* pool = reinterpret_cast<soinfo_pool_t*>(mmap((void*)addr, sizeof(*pool),
+                                                              PROT_READ|PROT_WRITE,
+                                                              MAP_PRIVATE|MAP_ANONYMOUS, 0, 0));
+  next_mmap_offset = (void*)((unsigned int)pool + (unsigned int)sizeof(*pool));
+  if (pool == MAP_FAILED) {
+    return false;
+  }
+
+  // Add the pool to our list of pools.
+  pool->next = gSoInfoPools;
+  gSoInfoPools = pool;
+
+  // Chain the entries in the new pool onto the free list.
+  gSoInfoFreeList = &pool->info[0];
+  soinfo* next = NULL;
+  for (int i = SOINFO_PER_POOL - 1; i >= 0; --i) {
+    pool->info[i].next = next;
+    next = &pool->info[i];
+  }
+
+  return true;
+}
+
 static void set_soinfo_pool_protection(int protection) {
   for (soinfo_pool_t* p = gSoInfoPools; p != NULL; p = p->next) {
     if (mprotect(p, sizeof(*p), protection) == -1) {
@@ -301,6 +331,31 @@ static soinfo* soinfo_alloc(const char* name) {
   }
 
   if (!ensure_free_list_non_empty()) {
+    DL_ERR("out of memory when loading \"%s\"", name);
+    return NULL;
+  }
+
+  // Take the head element off the free list.
+  soinfo* si = gSoInfoFreeList;
+  gSoInfoFreeList = gSoInfoFreeList->next;
+
+  // Initialize the new element.
+  memset(si, 0, sizeof(soinfo));
+  strlcpy(si->name, name, sizeof(si->name));
+  sonext->next = si;
+  sonext = si;
+
+  TRACE("name %s: allocated soinfo @ %p", name, si);
+  return si;
+}
+
+static soinfo* soinfo_alloc_sandbox(const char* name, const void* addr) {
+  if (strlen(name) >= SOINFO_NAME_LEN) {
+    DL_ERR("library name \"%s\" too long", name);
+    return NULL;
+  }
+
+  if (!ensure_free_list_non_empty_sandbox(addr)) {
     DL_ERR("out of memory when loading \"%s\"", name);
     return NULL;
   }
@@ -729,6 +784,43 @@ static soinfo* load_library(const char* name) {
     return si;
 }
 
+static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
+    // Open the file.
+    int fd = open_library(name);
+    if (fd == -1) {
+        DL_ERR("library \"%s\" not found", name);
+        return NULL;
+    }
+
+    // Read the ELF header and load the segments.
+    next_mmap_offset = NULL;
+    ElfReader elf_reader(name, fd, sandbox);
+    if (!elf_reader.Load()) {
+        return NULL;
+    }
+    void* addr = elf_reader.get_sandbox_addr();
+
+    const char* bname = strrchr(name, '/');
+    soinfo* si = soinfo_alloc_sandbox(bname ? bname + 1 : name, addr);
+    if (si == NULL) {
+        return NULL;
+    }
+    if (next_mmap_offset) {
+        unsigned int size = ((((unsigned int)next_mmap_offset >> 20)+1) << 20) -
+            (unsigned int)next_mmap_offset;
+        mmap(next_mmap_offset, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    }
+    si->base = elf_reader.load_start();
+    si->size = elf_reader.load_size();
+    si->load_bias = elf_reader.load_bias();
+    si->flags = 0;
+    si->entry = 0;
+    si->dynamic = NULL;
+    si->phnum = elf_reader.phdr_count();
+    si->phdr = elf_reader.loaded_phdr();
+    return si;
+}
+
 static soinfo *find_loaded_library(const char *name)
 {
     soinfo *si;
@@ -782,8 +874,50 @@ static soinfo* find_library_internal(const char* name) {
   return si;
 }
 
+static soinfo* find_library_internal_sandbox(const char* name, const void* sandbox) {
+  if (name == NULL) {
+    return somain;
+  }
+
+  soinfo* si = find_loaded_library(name);
+  if (si != NULL) {
+    if (si->flags & FLAG_LINKED) {
+      return si;
+    }
+    DL_ERR("OOPS: recursive link to \"%s\"", si->name);
+    return NULL;
+  }
+
+  TRACE("[ '%s' has not been loaded yet.  Locating...]", name);
+  si = load_library_in_sandbox(name, sandbox);
+  if (si == NULL) {
+    return NULL;
+  }
+
+  // At this point we know that whatever is loaded @ base is a valid ELF
+  // shared library whose segments are properly mapped in.
+  TRACE("[ init_library base=0x%08x sz=0x%08x name='%s' ]",
+        si->base, si->size, si->name);
+
+  if (!soinfo_link_image(si)) {
+    munmap(reinterpret_cast<void*>(si->base), si->size);
+    soinfo_free(si);
+    return NULL;
+  }
+
+  return si;
+}
+
 static soinfo* find_library(const char* name) {
   soinfo* si = find_library_internal(name);
+  if (si != NULL) {
+    si->ref_count++;
+  }
+  return si;
+}
+
+static soinfo* find_library_sandbox(const char* name, const void* sandbox) {
+  soinfo* si = find_library_internal_sandbox(name, sandbox);
   if (si != NULL) {
     si->ref_count++;
   }
@@ -827,6 +961,20 @@ soinfo* do_dlopen(const char* name, int flags) {
   }
   set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
   soinfo* si = find_library(name);
+  if (si != NULL) {
+    si->CallConstructors();
+  }
+  set_soinfo_pool_protection(PROT_READ);
+  return si;
+}
+
+soinfo* do_dlopen_in_sandbox(const char* name, int flags, const void* sandbox) {
+  if ((flags & ~(RTLD_NOW|RTLD_LAZY|RTLD_LOCAL|RTLD_GLOBAL)) != 0) {
+    DL_ERR("invalid flags to dlopen: %x", flags);
+    return NULL;
+  }
+  set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
+  soinfo* si = find_library_sandbox(name, sandbox);
   if (si != NULL) {
     si->CallConstructors();
   }
