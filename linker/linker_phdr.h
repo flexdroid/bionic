@@ -43,7 +43,7 @@ class ElfReader {
   ~ElfReader();
 
   bool Load();
-  void* get_sandbox_addr();
+  const void* get_sandbox_addr();
 
   size_t phdr_count() { return phdr_num_; }
   Elf32_Addr load_start() { return reinterpret_cast<Elf32_Addr>(load_start_); }
@@ -63,7 +63,6 @@ class ElfReader {
   const char* name_;
   int fd_;
   const void* sandbox_;
-  void* sandbox_addr_;
 
   Elf32_Ehdr header_;
   size_t phdr_num_;

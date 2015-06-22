@@ -72,7 +72,6 @@
  *   and NOEXEC
  */
 
-void* next_mmap_offset;
 static bool soinfo_link_image(soinfo* si);
 
 // We can't use malloc(3) in the dynamic linker. We use a linked list of anonymous
@@ -296,7 +295,6 @@ static bool ensure_free_list_non_empty_sandbox(const void* addr) {
   soinfo_pool_t* pool = reinterpret_cast<soinfo_pool_t*>(mmap((void*)addr, sizeof(*pool),
                                                               PROT_READ|PROT_WRITE,
                                                               MAP_PRIVATE|MAP_ANONYMOUS, 0, 0));
-  next_mmap_offset = (void*)((unsigned int)pool + (unsigned int)sizeof(*pool));
   if (pool == MAP_FAILED) {
     return false;
   }
@@ -784,6 +782,8 @@ static soinfo* load_library(const char* name) {
     return si;
 }
 
+#define SANDBOX_MBs 1
+
 static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     // Open the file.
     int fd = open_library(name);
@@ -793,22 +793,23 @@ static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     }
 
     // Read the ELF header and load the segments.
-    next_mmap_offset = NULL;
     ElfReader elf_reader(name, fd, sandbox);
     if (!elf_reader.Load()) {
         return NULL;
     }
-    void* addr = elf_reader.get_sandbox_addr();
+    const void* addr = elf_reader.get_sandbox_addr();
 
     const char* bname = strrchr(name, '/');
     soinfo* si = soinfo_alloc_sandbox(bname ? bname + 1 : name, addr);
     if (si == NULL) {
         return NULL;
     }
-    if (next_mmap_offset) {
-        unsigned int size = ((((unsigned int)next_mmap_offset >> 20)+1) << 20) -
-            (unsigned int)next_mmap_offset;
-        mmap(next_mmap_offset, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    __libc_format_log(3,"[sandbox]","addr = %p",addr);
+    if (addr) {
+        unsigned int size = ((((unsigned int)addr >> 20)+SANDBOX_MBs) << 20)
+            - (unsigned int)addr;
+        __libc_format_log(3,"[sandbox]","size = %u",size);
+        mmap((void*)addr, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     }
     si->base = elf_reader.load_start();
     si->size = elf_reader.load_size();
@@ -979,6 +980,14 @@ soinfo* do_dlopen_in_sandbox(const char* name, int flags, const void* sandbox) {
     si->CallConstructors();
   }
   set_soinfo_pool_protection(PROT_READ);
+
+  /*
+  if (sandbox && si) {
+    for (unsigned int i = 0; i < si->plt_rel_count; ++i) {
+      change_got((unsigned int)si->base+(unsigned int)si->plt_rel[i].r_offset);
+    }
+  }
+  */
   return si;
 }
 

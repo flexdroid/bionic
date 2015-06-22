@@ -126,7 +126,7 @@ ElfReader::~ElfReader() {
   if (fd_ != -1) {
     close(fd_);
   }
-  if (phdr_mmap_ != NULL) {
+  if (phdr_mmap_ != NULL && !sandbox_) {
     munmap(phdr_mmap_, phdr_size_);
   }
 }
@@ -140,8 +140,10 @@ bool ElfReader::Load() {
          FindPhdr();
 }
 
-void* ElfReader::get_sandbox_addr() {
-    return (void*)((((unsigned int)sandbox_addr_ >> 12) + 1) << 12);
+const void* ElfReader::get_sandbox_addr() {
+    if ((unsigned int)sandbox_ % 0x1000)
+      return (const void*)((((unsigned int)sandbox_ >> 12) + 1) << 12);
+    return sandbox_;
 }
 
 bool ElfReader::ReadElfHeader() {
@@ -222,20 +224,18 @@ bool ElfReader::ReadProgramHeader() {
   phdr_size_ = page_max - page_min;
 
   void* mmap_result = mmap((void*)sandbox_, phdr_size_, PROT_READ, MAP_PRIVATE, fd_, page_min);
-  // DL_ERR("mmap_result = %p, sandbox = %p", mmap_result, sandbox_);
   if (sandbox_)
     __libc_format_log(3,"[sandbox]","mmap_result = %p, sandbox = %p, phdr_size_ = %d",
         mmap_result, sandbox_, (int)phdr_size_);
-  sandbox_addr_ = mmap_result;
   if (mmap_result == MAP_FAILED) {
     DL_ERR("\"%s\" phdr mmap failed: %s", name_, strerror(errno));
     return false;
   }
   if (sandbox_) {
-    next_mmap_offset = (void*)((unsigned int)mmap_result + (unsigned int)phdr_size_);
+    sandbox_ = (const void*)((unsigned long)mmap_result + (unsigned long)phdr_size_);
     // round up to make it page-aligned
-    if ((unsigned int)next_mmap_offset % 0x1000)
-      next_mmap_offset = (void*)((((unsigned int)next_mmap_offset >> 12) + 1) << 12);
+    if ((unsigned int)sandbox_ % 0x1000)
+      sandbox_ = (void*)((((unsigned int)sandbox_ >> 12) + 1) << 12);
   }
 
   phdr_mmap_ = mmap_result;
@@ -308,19 +308,18 @@ bool ElfReader::ReserveAddressSpace() {
   uint8_t* addr = reinterpret_cast<uint8_t*>(min_vaddr);
   int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
   void* start;
-  if (next_mmap_offset)
-    start = mmap(next_mmap_offset, load_size_, PROT_NONE, mmap_flags, -1, 0);
+  if (sandbox_)
+    start = mmap((void*)sandbox_, load_size_, PROT_NONE, mmap_flags, -1, 0);
   else
     start = mmap(addr, load_size_, PROT_NONE, mmap_flags, -1, 0);
   if (sandbox_)
     __libc_format_log(3,"[sandbox]","start = %p, addr = %p", start, addr);
-  sandbox_addr_ = start;
   if (start == MAP_FAILED) {
     DL_ERR("couldn't reserve %d bytes of address space for \"%s\"", load_size_, name_);
     return false;
   }
   if (sandbox_)
-    next_mmap_offset = (void*)((unsigned int)start + (unsigned int)load_size_);
+    sandbox_ = (void*)((unsigned int)start + (unsigned int)load_size_);
 
   load_start_ = start;
   load_bias_ = reinterpret_cast<uint8_t*>(start) - addr;
@@ -364,13 +363,12 @@ bool ElfReader::LoadSegments() {
                             file_page_start);
       if (sandbox_)
         __libc_format_log(3,"[sandbox]","seg_addr = %p, seg_page_start = %p", seg_addr, (void*)seg_page_start);
-      sandbox_addr_ = seg_addr;
       if (seg_addr == MAP_FAILED) {
         DL_ERR("couldn't map \"%s\" segment %d: %s", name_, i, strerror(errno));
         return false;
       }
       if (sandbox_)
-        next_mmap_offset = (void*)((unsigned int)seg_addr + (unsigned int)file_length);
+        sandbox_ = (void*)((unsigned int)seg_addr + (unsigned int)file_length);
     }
 
     // if the segment is writable, and does not end on a page boundary,
@@ -394,13 +392,12 @@ bool ElfReader::LoadSegments() {
                            0);
       if (sandbox_)
         __libc_format_log(3,"[sandbox]","zeromap = %p, seg_file_end = %p", zeromap, (void*)seg_file_end);
-      sandbox_addr_ = zeromap;
       if (zeromap == MAP_FAILED) {
         DL_ERR("couldn't zero fill \"%s\" gap: %s", name_, strerror(errno));
         return false;
       }
       if (sandbox_)
-        next_mmap_offset = (void*)((unsigned int)zeromap + (unsigned int)(seg_page_end - seg_file_end));
+        sandbox_ = (void*)((unsigned int)zeromap + (unsigned int)(seg_page_end - seg_file_end));
     }
   }
   return true;
