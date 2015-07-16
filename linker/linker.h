@@ -187,7 +187,7 @@ extern void* next_mmap_offset;
 
 void do_android_update_LD_LIBRARY_PATH(const char* ld_library_path);
 soinfo* do_dlopen(const char* name, int flags);
-soinfo* do_dlopen_in_sandbox(const char* name, int flags, const void* sandbox);
+soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** sandbox);
 int do_dlclose(soinfo* si);
 
 Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start);
@@ -202,5 +202,9 @@ extern "C" void notify_gdb_of_libraries();
 
 char* linker_get_error_buffer();
 size_t linker_get_error_buffer_size();
+
+void* sandbox_section_alloc(void);
+void* sandbox_mmap(void *addr, size_t length, int prot, int flags,
+    int fd, off_t offset);
 
 #endif

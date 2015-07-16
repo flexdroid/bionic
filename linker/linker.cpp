@@ -286,13 +286,13 @@ static bool ensure_free_list_non_empty() {
   return true;
 }
 
-static bool ensure_free_list_non_empty_sandbox(const void* addr) {
+static bool ensure_free_list_non_empty_sandbox(void* addr) {
   if (gSoInfoFreeList != NULL) {
     return true;
   }
 
   // Allocate a new pool.
-  soinfo_pool_t* pool = reinterpret_cast<soinfo_pool_t*>(mmap((void*)addr, sizeof(*pool),
+  soinfo_pool_t* pool = reinterpret_cast<soinfo_pool_t*>(sandbox_mmap(addr, sizeof(*pool),
                                                               PROT_READ|PROT_WRITE,
                                                               MAP_PRIVATE|MAP_ANONYMOUS, 0, 0));
   if (pool == MAP_FAILED) {
@@ -347,7 +347,7 @@ static soinfo* soinfo_alloc(const char* name) {
   return si;
 }
 
-static soinfo* soinfo_alloc_sandbox(const char* name, const void* addr) {
+static soinfo* soinfo_alloc_sandbox(const char* name, void* addr) {
   if (strlen(name) >= SOINFO_NAME_LEN) {
     DL_ERR("library name \"%s\" too long", name);
     return NULL;
@@ -761,7 +761,7 @@ static soinfo* load_library(const char* name) {
     }
 
     // Read the ELF header and load the segments.
-    ElfReader elf_reader(name, fd);
+    ElfReader elf_reader(name, fd, NULL);
     if (!elf_reader.Load()) {
         return NULL;
     }
@@ -793,23 +793,16 @@ static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     }
 
     // Read the ELF header and load the segments.
-    ElfReader elf_reader(name, fd, sandbox);
+    ElfReader elf_reader(name, fd, (void*)sandbox);
     if (!elf_reader.Load()) {
         return NULL;
     }
-    const void* addr = elf_reader.get_sandbox_addr();
+    void* addr = elf_reader.get_sandbox_addr();
 
     const char* bname = strrchr(name, '/');
     soinfo* si = soinfo_alloc_sandbox(bname ? bname + 1 : name, addr);
     if (si == NULL) {
         return NULL;
-    }
-    __libc_format_log(3,"[sandbox]","addr = %p",addr);
-    if (addr) {
-        unsigned int size = ((((unsigned int)addr >> 20)+SANDBOX_MBs) << 20)
-            - (unsigned int)addr;
-        __libc_format_log(3,"[sandbox]","size = %u",size);
-        mmap((void*)addr, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     }
     si->base = elf_reader.load_start();
     si->size = elf_reader.load_size();
@@ -901,7 +894,7 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
         si->base, si->size, si->name);
 
   if (!soinfo_link_image(si)) {
-    munmap(reinterpret_cast<void*>(si->base), si->size);
+    // munmap(reinterpret_cast<void*>(si->base), si->size);
     soinfo_free(si);
     return NULL;
   }
@@ -969,18 +962,84 @@ soinfo* do_dlopen(const char* name, int flags) {
   return si;
 }
 
-soinfo* do_dlopen_in_sandbox(const char* name, int flags, const void* sandbox) {
+#include <assert.h>
+
+#define SECTION_SIZE (1 << 20) // 1 MB
+#define SANDBOX_SECTION_TOTAL_SIZE (256 * SECTION_SIZE)
+#define STACK_SIZE (4*SECTION_SIZE)
+#define ROUND_UP(ptr, size) \
+  (((unsigned long)(ptr) % size) ? \
+   ((((unsigned long)(ptr) >> 20) + 1) << 20) : (unsigned long)(ptr))
+static void* sandbox_section_base = NULL;
+static void* sandbox_section_end = NULL;
+void* sandbox_section_alloc(void) {
+  if (sandbox_section_base == NULL) {
+    sandbox_section_base = mmap(NULL, SANDBOX_SECTION_TOTAL_SIZE,
+        PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    sandbox_section_end = (void*)ROUND_UP(sandbox_section_base, SECTION_SIZE);
+    if (sandbox_section_end > sandbox_section_base)
+      munmap(sandbox_section_base,
+          (unsigned long)sandbox_section_end - (unsigned long)sandbox_section_base);
+
+    /* because of mmap bug .. check allocation */
+    for (size_t i = 0; i < SANDBOX_SECTION_TOTAL_SIZE/SECTION_SIZE; ++i) {
+      *(int*)((size_t)sandbox_section_end+i*SECTION_SIZE) = 3;
+    }
+
+#if defined(__arm__)
+    asm volatile(
+        "push {r0, r7}\n"
+        "mov r0, %[end]\n"
+        "ldr r7, =0x17e\n"
+        "svc #0\n"
+        "pop {r0, r7}\n"
+        : : [end] "r" (sandbox_section_end));
+#endif
+  }
+  __libc_format_log(3,"[sandbox]","sandbox_section_end=%p",sandbox_section_end);
+  return sandbox_section_end;
+}
+
+/* flags must be combination of MAP_PRIVATE, MAP_ANONYMOUS, MAP_FIXED */
+void* sandbox_mmap(void *addr, size_t length, int prot, int flags,
+    int fd, off_t offset)
+{
+  if (!(flags & MAP_FIXED))
+    sandbox_section_end = (void*)((size_t)sandbox_section_end + ROUND_UP(length, PAGE_SIZE));
+  __libc_format_log(3,"[sandbox]","sandbox_section_end=%p",sandbox_section_end);
+  if (addr) {
+    void* ret = NULL;
+    assert((unsigned long)addr % PAGE_SIZE == 0);
+    if (fd > 2 || (flags & MAP_FIXED)) {
+      /* file mapped memory */
+      ret = mmap(addr, length, prot, MAP_FIXED | flags, fd, offset);
+      assert(ret == addr);
+    } else {
+      assert(!mprotect(addr, length, prot));
+      ret = addr;
+    }
+    return ret;
+  } else {
+    /* not reached */
+    assert(!"sandbox_mmap must be invoked with addr");
+    return mmap(addr, length, prot, flags, fd, offset);
+  }
+}
+
+soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** psandbox) {
   if ((flags & ~(RTLD_NOW|RTLD_LAZY|RTLD_LOCAL|RTLD_GLOBAL)) != 0) {
     DL_ERR("invalid flags to dlopen: %x", flags);
     return NULL;
   }
   set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
-  soinfo* si = find_library_sandbox(name, sandbox);
+  soinfo* si = find_library_sandbox(name, (const void*)*psandbox);
   if (si != NULL) {
     si->CallConstructors();
   }
   set_soinfo_pool_protection(PROT_READ);
 
+  *psandbox = sandbox_section_end;
+  sandbox_section_end = (void*)((size_t)sandbox_section_end + STACK_SIZE);
   /*
   if (sandbox && si) {
     for (unsigned int i = 0; i < si->plt_rel_count; ++i) {

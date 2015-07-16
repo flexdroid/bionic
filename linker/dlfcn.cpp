@@ -70,9 +70,10 @@ void* dlopen(const char* filename, int flags) {
   return result;
 }
 
-void* dlopen_in_sandbox(const char* filename, int flags, const void* sandbox) {
+void* dlopen_in_sandbox(const char* filename, int flags, void** psandbox) {
   ScopedPthreadMutexLocker locker(&gDlMutex);
-  soinfo* result = do_dlopen_in_sandbox(filename, flags, sandbox);
+  *psandbox = sandbox_section_alloc();
+  soinfo* result = do_dlopen_in_sandbox(filename, flags, psandbox);
   if (result == NULL) {
     __bionic_format_dlerror("dlopen failed", linker_get_error_buffer());
     return NULL;

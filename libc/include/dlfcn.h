@@ -48,7 +48,7 @@ extern int          dlclose(void*  handle);
 extern const char*  dlerror(void);
 extern void*        dlsym(void*  handle, const char*  symbol);
 extern int          dladdr(const void* addr, Dl_info *info);
-extern void*        dlopen_in_sandbox(const char*  filename, int flag, const void* sandbox);
+extern void*        dlopen_in_sandbox(const char*  filename, int flag, void** psandbox);
 
 enum {
   RTLD_NOW  = 0,
