@@ -72,7 +72,7 @@
  *   and NOEXEC
  */
 
-static bool soinfo_link_image(soinfo* si);
+static bool soinfo_link_image(soinfo* si, const void* sandbox);
 
 // We can't use malloc(3) in the dynamic linker. We use a linked list of anonymous
 // maps, each a single page in size. The pages are broken up into as many struct soinfo
@@ -859,7 +859,7 @@ static soinfo* find_library_internal(const char* name) {
   TRACE("[ init_library base=0x%08x sz=0x%08x name='%s' ]",
         si->base, si->size, si->name);
 
-  if (!soinfo_link_image(si)) {
+  if (!soinfo_link_image(si, NULL)) {
     munmap(reinterpret_cast<void*>(si->base), si->size);
     soinfo_free(si);
     return NULL;
@@ -893,7 +893,7 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
   TRACE("[ init_library base=0x%08x sz=0x%08x name='%s' ]",
         si->base, si->size, si->name);
 
-  if (!soinfo_link_image(si)) {
+  if (!soinfo_link_image(si, sandbox)) {
     // munmap(reinterpret_cast<void*>(si->base), si->size);
     soinfo_free(si);
     return NULL;
@@ -965,11 +965,12 @@ soinfo* do_dlopen(const char* name, int flags) {
 #include <assert.h>
 
 #define SECTION_SIZE (1 << 20) // 1 MB
-#define SANDBOX_SECTION_TOTAL_SIZE (256 * SECTION_SIZE)
-#define STACK_SIZE (4*SECTION_SIZE)
+#define SANDBOX_SECTION_TOTAL_SIZE (128 * SECTION_SIZE)
+// #define STACK_SIZE (4*SECTION_SIZE)
+#define MODULAR(ptr, size) ((unsigned long)(ptr) % size)
 #define ROUND_UP(ptr, size) \
-  (((unsigned long)(ptr) % size) ? \
-   ((((unsigned long)(ptr) >> 20) + 1) << 20) : (unsigned long)(ptr))
+  (MODULAR(ptr, size) ? \
+   (unsigned long)(ptr) - MODULAR(ptr, size) + size : (unsigned long)(ptr))
 static void* sandbox_section_base = NULL;
 static void* sandbox_section_end = NULL;
 void* sandbox_section_alloc(void) {
@@ -982,7 +983,7 @@ void* sandbox_section_alloc(void) {
           (unsigned long)sandbox_section_end - (unsigned long)sandbox_section_base);
 
     /* because of mmap bug .. check allocation */
-    for (size_t i = 0; i < SANDBOX_SECTION_TOTAL_SIZE/SECTION_SIZE; ++i) {
+    for (size_t i = 0; i < 127; ++i) {
       *(int*)((size_t)sandbox_section_end+i*SECTION_SIZE) = 3;
     }
 
@@ -1039,14 +1040,7 @@ soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** psandbox) {
   set_soinfo_pool_protection(PROT_READ);
 
   *psandbox = sandbox_section_end;
-  sandbox_section_end = (void*)((size_t)sandbox_section_end + STACK_SIZE);
-  /*
-  if (sandbox && si) {
-    for (unsigned int i = 0; i < si->plt_rel_count; ++i) {
-      change_got((unsigned int)si->base+(unsigned int)si->plt_rel[i].r_offset);
-    }
-  }
-  */
+  sandbox_section_end = (void*)((size_t)sandbox_section_end + PAGE_SIZE);
   return si;
 }
 
@@ -1516,7 +1510,7 @@ static int nullify_closed_stdio() {
     return return_value;
 }
 
-static bool soinfo_link_image(soinfo* si) {
+static bool soinfo_link_image(soinfo* si, const void* sandbox) {
     /* "base" might wrap around UINT32_MAX. */
     Elf32_Addr base = si->load_bias;
     const Elf32_Phdr *phdr = si->phdr;
@@ -1729,7 +1723,11 @@ static bool soinfo_link_image(soinfo* si) {
         if (d->d_tag == DT_NEEDED) {
             const char* library_name = si->strtab + d->d_un.d_val;
             DEBUG("%s needs %s", si->name, library_name);
-            soinfo* lsi = find_library(library_name);
+            soinfo* lsi = NULL;
+            if (sandbox)
+              lsi = find_library_sandbox(library_name, sandbox);
+            else
+              lsi = find_library(library_name);
             if (lsi == NULL) {
                 strlcpy(tmp_err_buf, linker_get_error_buffer(), sizeof(tmp_err_buf));
                 DL_ERR("could not load library \"%s\" needed by \"%s\"; caused by %s",
@@ -1941,7 +1939,7 @@ static Elf32_Addr __linker_init_post_relocation(KernelArgumentBlock& args, Elf32
 
     somain = si;
 
-    if (!soinfo_link_image(si)) {
+    if (!soinfo_link_image(si, NULL)) {
         __libc_format_fd(2, "CANNOT LINK EXECUTABLE: %s\n", linker_get_error_buffer());
         exit(EXIT_FAILURE);
     }
@@ -2055,7 +2053,7 @@ extern "C" Elf32_Addr __linker_init(void* raw_args) {
   linker_so.phnum = elf_hdr->e_phnum;
   linker_so.flags |= FLAG_LINKER;
 
-  if (!soinfo_link_image(&linker_so)) {
+  if (!soinfo_link_image(&linker_so, NULL)) {
     // It would be nice to print an error message, but if the linker
     // can't link itself, there's no guarantee that we'll be able to
     // call write() (because it involves a GOT reference).
