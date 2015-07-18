@@ -175,6 +175,7 @@ struct soinfo {
 };
 
 extern soinfo libdl_info;
+extern soinfo libdl_info_ut;
 extern void* next_mmap_offset;
 
 // These aren't defined in <sys/exec_elf.h>.
@@ -190,8 +191,9 @@ soinfo* do_dlopen(const char* name, int flags);
 soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** sandbox);
 int do_dlclose(soinfo* si);
 
-Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start);
-soinfo* find_containing_library(const void* addr);
+Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start,
+        bool untrusted);
+soinfo* find_containing_library(const void* addr, bool untrusted);
 
 Elf32_Sym* dladdr_find_symbol(soinfo* si, const void* addr);
 Elf32_Sym* dlsym_handle_lookup(soinfo* si, const char* name);

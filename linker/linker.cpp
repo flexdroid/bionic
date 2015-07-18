@@ -72,7 +72,7 @@
  *   and NOEXEC
  */
 
-static bool soinfo_link_image(soinfo* si, const void* sandbox);
+static bool soinfo_link_image(soinfo* si, bool untrusted);
 
 // We can't use malloc(3) in the dynamic linker. We use a linked list of anonymous
 // maps, each a single page in size. The pages are broken up into as many struct soinfo
@@ -88,6 +88,13 @@ static soinfo* gSoInfoFreeList = NULL;
 static soinfo* solist = &libdl_info;
 static soinfo* sonext = &libdl_info;
 static soinfo* somain; /* main process, always the one after libdl_info */
+
+/* linking untrusted code */
+static struct soinfo_pool_t* gSoInfoPoolsUT = NULL;
+static soinfo* gSoInfoFreeListUT = NULL;
+
+static soinfo* solistUT = NULL;
+static soinfo* sonextUT = NULL;
 
 static const char* const gSoPaths[] = {
   "/vendor/lib",
@@ -287,7 +294,7 @@ static bool ensure_free_list_non_empty() {
 }
 
 static bool ensure_free_list_non_empty_sandbox(void* addr) {
-  if (gSoInfoFreeList != NULL) {
+  if (gSoInfoFreeListUT != NULL) {
     return true;
   }
 
@@ -300,11 +307,11 @@ static bool ensure_free_list_non_empty_sandbox(void* addr) {
   }
 
   // Add the pool to our list of pools.
-  pool->next = gSoInfoPools;
-  gSoInfoPools = pool;
+  pool->next = gSoInfoPoolsUT;
+  gSoInfoPoolsUT = pool;
 
   // Chain the entries in the new pool onto the free list.
-  gSoInfoFreeList = &pool->info[0];
+  gSoInfoFreeListUT = &pool->info[0];
   soinfo* next = NULL;
   for (int i = SOINFO_PER_POOL - 1; i >= 0; --i) {
     pool->info[i].next = next;
@@ -314,8 +321,9 @@ static bool ensure_free_list_non_empty_sandbox(void* addr) {
   return true;
 }
 
-static void set_soinfo_pool_protection(int protection) {
-  for (soinfo_pool_t* p = gSoInfoPools; p != NULL; p = p->next) {
+static void set_soinfo_pool_protection(int protection, bool untrusted) {
+  for (soinfo_pool_t* p = untrusted ? gSoInfoPoolsUT : gSoInfoPools;
+          p != NULL; p = p->next) {
     if (mprotect(p, sizeof(*p), protection) == -1) {
       abort(); // Can't happen.
     }
@@ -359,20 +367,20 @@ static soinfo* soinfo_alloc_sandbox(const char* name, void* addr) {
   }
 
   // Take the head element off the free list.
-  soinfo* si = gSoInfoFreeList;
-  gSoInfoFreeList = gSoInfoFreeList->next;
+  soinfo* si = gSoInfoFreeListUT;
+  gSoInfoFreeListUT = gSoInfoFreeListUT->next;
 
   // Initialize the new element.
   memset(si, 0, sizeof(soinfo));
   strlcpy(si->name, name, sizeof(si->name));
-  sonext->next = si;
-  sonext = si;
+  sonextUT->next = si;
+  sonextUT = si;
 
   TRACE("name %s: allocated soinfo @ %p", name, si);
   return si;
 }
 
-static void soinfo_free(soinfo* si)
+static void soinfo_free(soinfo* si, bool untrusted)
 {
     if (si == NULL) {
         return;
@@ -382,7 +390,7 @@ static void soinfo_free(soinfo* si)
 
     TRACE("name %s: freeing soinfo @ %p", si->name, si);
 
-    for (trav = solist; trav != NULL; trav = trav->next) {
+    for (trav = untrusted ? solistUT : solist; trav != NULL; trav = trav->next) {
         if (trav == si)
             break;
         prev = trav;
@@ -397,11 +405,22 @@ static void soinfo_free(soinfo* si)
        always the static libdl_info.
     */
     prev->next = si->next;
-    if (si == sonext) {
-        sonext = prev;
+    if (untrusted) {
+        if (si == sonextUT) {
+            sonextUT = prev;
+        }
+    } else {
+        if (si == sonext) {
+            sonext = prev;
+        }
     }
-    si->next = gSoInfoFreeList;
-    gSoInfoFreeList = si;
+    if (untrusted) {
+        si->next = gSoInfoFreeListUT;
+        gSoInfoFreeListUT = si;
+    } else {
+        si->next = gSoInfoFreeList;
+        gSoInfoFreeList = si;
+    }
 }
 
 
@@ -457,7 +476,18 @@ _Unwind_Ptr dl_unwind_find_exidx(_Unwind_Ptr pc, int *pcount)
     soinfo *si;
     unsigned addr = (unsigned)pc;
 
+    /* for trusted code */
     for (si = solist; si != 0; si = si->next){
+        if ((addr >= si->base) && (addr < (si->base + si->size))) {
+            *pcount = si->ARM_exidx_count;
+            return (_Unwind_Ptr)si->ARM_exidx;
+        }
+    }
+    /*
+     * for untrusted code
+     * Q: will it be called???
+     */
+    for (si = solistUT; si != 0; si = si->next){
         if ((addr >= si->base) && (addr < (si->base + si->size))) {
             *pcount = si->ARM_exidx_count;
             return (_Unwind_Ptr)si->ARM_exidx;
@@ -652,11 +682,12 @@ Elf32_Sym* dlsym_handle_lookup(soinfo* si, const char* name)
    beginning of the global solist. Otherwise the search starts at the
    specified soinfo (for RTLD_NEXT).
  */
-Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start) {
+Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start,
+        bool untrusted) {
   unsigned elf_hash = elfhash(name);
 
   if (start == NULL) {
-    start = solist;
+    start = untrusted ? solistUT : solist;
   }
 
   Elf32_Sym* s = NULL;
@@ -676,9 +707,9 @@ Elf32_Sym* dlsym_linear_lookup(const char* name, soinfo** found, soinfo* start) 
   return s;
 }
 
-soinfo* find_containing_library(const void* p) {
+soinfo* find_containing_library(const void* p, bool untrusted) {
   Elf32_Addr address = reinterpret_cast<Elf32_Addr>(p);
-  for (soinfo* si = solist; si != NULL; si = si->next) {
+  for (soinfo* si = untrusted ? solistUT : solist; si != NULL; si = si->next) {
     if (address >= si->base && address - si->base < si->size) {
       return si;
     }
@@ -815,7 +846,7 @@ static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     return si;
 }
 
-static soinfo *find_loaded_library(const char *name)
+static soinfo *find_loaded_library(const char *name, bool untrusted)
 {
     soinfo *si;
     const char *bname;
@@ -826,7 +857,7 @@ static soinfo *find_loaded_library(const char *name)
     bname = strrchr(name, '/');
     bname = bname ? bname + 1 : name;
 
-    for (si = solist; si != NULL; si = si->next) {
+    for (si = untrusted ? solistUT : solist; si != NULL; si = si->next) {
         if (!strcmp(bname, si->name)) {
             return si;
         }
@@ -839,7 +870,7 @@ static soinfo* find_library_internal(const char* name) {
     return somain;
   }
 
-  soinfo* si = find_loaded_library(name);
+  soinfo* si = find_loaded_library(name, false);
   if (si != NULL) {
     if (si->flags & FLAG_LINKED) {
       return si;
@@ -859,9 +890,9 @@ static soinfo* find_library_internal(const char* name) {
   TRACE("[ init_library base=0x%08x sz=0x%08x name='%s' ]",
         si->base, si->size, si->name);
 
-  if (!soinfo_link_image(si, NULL)) {
+  if (!soinfo_link_image(si, false)) {
     munmap(reinterpret_cast<void*>(si->base), si->size);
-    soinfo_free(si);
+    soinfo_free(si, false);
     return NULL;
   }
 
@@ -873,7 +904,7 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
     return somain;
   }
 
-  soinfo* si = find_loaded_library(name);
+  soinfo* si = find_loaded_library(name, true);
   if (si != NULL) {
     if (si->flags & FLAG_LINKED) {
       return si;
@@ -893,9 +924,9 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
   TRACE("[ init_library base=0x%08x sz=0x%08x name='%s' ]",
         si->base, si->size, si->name);
 
-  if (!soinfo_link_image(si, sandbox)) {
+  if (!soinfo_link_image(si, true)) {
     // munmap(reinterpret_cast<void*>(si->base), si->size);
-    soinfo_free(si);
+    soinfo_free(si, true);
     return NULL;
   }
 
@@ -927,13 +958,13 @@ static int soinfo_unload(soinfo* si) {
       if (d->d_tag == DT_NEEDED) {
         const char* library_name = si->strtab + d->d_un.d_val;
         TRACE("%s needs to unload %s", si->name, library_name);
-        soinfo_unload(find_loaded_library(library_name));
+        soinfo_unload(find_loaded_library(library_name, false));
       }
     }
 
     munmap(reinterpret_cast<void*>(si->base), si->size);
     notify_gdb_of_unload(si);
-    soinfo_free(si);
+    soinfo_free(si, false);
     si->ref_count = 0;
   } else {
     si->ref_count--;
@@ -953,12 +984,12 @@ soinfo* do_dlopen(const char* name, int flags) {
     DL_ERR("invalid flags to dlopen: %x", flags);
     return NULL;
   }
-  set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
+  set_soinfo_pool_protection(PROT_READ | PROT_WRITE, false);
   soinfo* si = find_library(name);
   if (si != NULL) {
     si->CallConstructors();
   }
-  set_soinfo_pool_protection(PROT_READ);
+  set_soinfo_pool_protection(PROT_READ, false);
   return si;
 }
 
@@ -1028,16 +1059,31 @@ void* sandbox_mmap(void *addr, size_t length, int prot, int flags,
 }
 
 soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** psandbox) {
+  if (!solistUT) {
+    // solistUT = find_library_sandbox("libdl.so", (const void*)sandbox_section_alloc());
+    void* addr = sandbox_section_alloc();
+    if (!ensure_free_list_non_empty_sandbox(addr)) {
+      DL_ERR("out of memory when loading \"%s\"", name);
+      return NULL;
+    }
+    solistUT = gSoInfoFreeListUT;
+    gSoInfoFreeListUT = gSoInfoFreeListUT->next;
+    sonextUT = solistUT;
+    memcpy(solistUT, &libdl_info, sizeof(*solistUT));
+    solistUT->next = NULL;
+  }
+
+  *psandbox = sandbox_section_alloc();
   if ((flags & ~(RTLD_NOW|RTLD_LAZY|RTLD_LOCAL|RTLD_GLOBAL)) != 0) {
     DL_ERR("invalid flags to dlopen: %x", flags);
     return NULL;
   }
-  set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
+  set_soinfo_pool_protection(PROT_READ | PROT_WRITE, true);
   soinfo* si = find_library_sandbox(name, (const void*)*psandbox);
   if (si != NULL) {
     si->CallConstructors();
   }
-  set_soinfo_pool_protection(PROT_READ);
+  set_soinfo_pool_protection(PROT_READ, true);
 
   *psandbox = sandbox_section_end;
   sandbox_section_end = (void*)((size_t)sandbox_section_end + PAGE_SIZE);
@@ -1045,9 +1091,9 @@ soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** psandbox) {
 }
 
 int do_dlclose(soinfo* si) {
-  set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
+  set_soinfo_pool_protection(PROT_READ | PROT_WRITE, false);
   int result = soinfo_unload(si);
-  set_soinfo_pool_protection(PROT_READ);
+  set_soinfo_pool_protection(PROT_READ, false);
   return result;
 }
 
@@ -1390,7 +1436,7 @@ void soinfo::CallFunction(const char* function_name UNUSED, linker_function_t fu
 
   // The function may have called dlopen(3) or dlclose(3), so we need to ensure our data structures
   // are still writable. This happens with our debug malloc (see http://b/7941716).
-  set_soinfo_pool_protection(PROT_READ | PROT_WRITE);
+  set_soinfo_pool_protection(PROT_READ | PROT_WRITE, false);
 }
 
 void soinfo::CallPreInitConstructors() {
@@ -1427,7 +1473,7 @@ void soinfo::CallConstructors() {
       if (d->d_tag == DT_NEEDED) {
         const char* library_name = strtab + d->d_un.d_val;
         TRACE("\"%s\": calling constructors in DT_NEEDED \"%s\"", name, library_name);
-        find_loaded_library(library_name)->CallConstructors();
+        find_loaded_library(library_name, false)->CallConstructors();
       }
     }
   }
@@ -1510,7 +1556,7 @@ static int nullify_closed_stdio() {
     return return_value;
 }
 
-static bool soinfo_link_image(soinfo* si, const void* sandbox) {
+static bool soinfo_link_image(soinfo* si, bool untrusted) {
     /* "base" might wrap around UINT32_MAX. */
     Elf32_Addr base = si->load_bias;
     const Elf32_Phdr *phdr = si->phdr;
@@ -1724,9 +1770,9 @@ static bool soinfo_link_image(soinfo* si, const void* sandbox) {
             const char* library_name = si->strtab + d->d_un.d_val;
             DEBUG("%s needs %s", si->name, library_name);
             soinfo* lsi = NULL;
-            if (sandbox)
-              lsi = find_library_sandbox(library_name, sandbox);
-            else
+            if (untrusted) {
+              lsi = find_library_sandbox(library_name, (const void*)sandbox_section_alloc());
+            } else
               lsi = find_library(library_name);
             if (lsi == NULL) {
                 strlcpy(tmp_err_buf, linker_get_error_buffer(), sizeof(tmp_err_buf));
@@ -1793,7 +1839,8 @@ static bool soinfo_link_image(soinfo* si, const void* sandbox) {
         return false;
     }
 
-    notify_gdb_of_load(si);
+    if (!untrusted)
+      notify_gdb_of_load(si);
     return true;
 }
 
@@ -1939,7 +1986,7 @@ static Elf32_Addr __linker_init_post_relocation(KernelArgumentBlock& args, Elf32
 
     somain = si;
 
-    if (!soinfo_link_image(si, NULL)) {
+    if (!soinfo_link_image(si, false)) {
         __libc_format_fd(2, "CANNOT LINK EXECUTABLE: %s\n", linker_get_error_buffer());
         exit(EXIT_FAILURE);
     }
@@ -2053,7 +2100,7 @@ extern "C" Elf32_Addr __linker_init(void* raw_args) {
   linker_so.phnum = elf_hdr->e_phnum;
   linker_so.flags |= FLAG_LINKER;
 
-  if (!soinfo_link_image(&linker_so, NULL)) {
+  if (!soinfo_link_image(&linker_so, false)) {
     // It would be nice to print an error message, but if the linker
     // can't link itself, there's no guarantee that we'll be able to
     // call write() (because it involves a GOT reference).
@@ -2068,7 +2115,7 @@ extern "C" Elf32_Addr __linker_init(void* raw_args) {
   args.abort_message_ptr = &gAbortMessage;
   Elf32_Addr start_address = __linker_init_post_relocation(args, linker_addr);
 
-  set_soinfo_pool_protection(PROT_READ);
+  set_soinfo_pool_protection(PROT_READ, false);
 
   // Return the address that the calling assembly stub should jump to.
   return start_address;

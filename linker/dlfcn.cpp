@@ -72,7 +72,6 @@ void* dlopen(const char* filename, int flags) {
 
 void* dlopen_in_sandbox(const char* filename, int flags, void** psandbox) {
   ScopedPthreadMutexLocker locker(&gDlMutex);
-  *psandbox = sandbox_section_alloc();
   soinfo* result = do_dlopen_in_sandbox(filename, flags, psandbox);
   if (result == NULL) {
     __bionic_format_dlerror("dlopen failed", linker_get_error_buffer());
@@ -96,14 +95,59 @@ void* dlsym(void* handle, const char* symbol) {
   soinfo* found = NULL;
   Elf32_Sym* sym = NULL;
   if (handle == RTLD_DEFAULT) {
-    sym = dlsym_linear_lookup(symbol, &found, NULL);
+    sym = dlsym_linear_lookup(symbol, &found, NULL, false);
   } else if (handle == RTLD_NEXT) {
     void* ret_addr = __builtin_return_address(0);
-    soinfo* si = find_containing_library(ret_addr);
+    soinfo* si = find_containing_library(ret_addr, false);
 
     sym = NULL;
     if (si && si->next) {
-      sym = dlsym_linear_lookup(symbol, &found, si->next);
+      sym = dlsym_linear_lookup(symbol, &found, si->next, false);
+    }
+  } else {
+    found = reinterpret_cast<soinfo*>(handle);
+    sym = dlsym_handle_lookup(found, symbol);
+  }
+
+  if (sym != NULL) {
+    unsigned bind = ELF32_ST_BIND(sym->st_info);
+
+    if (bind == STB_GLOBAL && sym->st_shndx != 0) {
+      unsigned ret = sym->st_value + found->load_bias;
+      return (void*) ret;
+    }
+
+    __bionic_format_dlerror("symbol found but not global", symbol);
+    return NULL;
+  } else {
+    __bionic_format_dlerror("undefined symbol", symbol);
+    return NULL;
+  }
+}
+
+void* dlsym_in_sandbox(void* handle, const char* symbol) {
+  ScopedPthreadMutexLocker locker(&gDlMutex);
+
+  if (handle == NULL) {
+    __bionic_format_dlerror("dlsym library handle is null", NULL);
+    return NULL;
+  }
+  if (symbol == NULL) {
+    __bionic_format_dlerror("dlsym symbol name is null", NULL);
+    return NULL;
+  }
+
+  soinfo* found = NULL;
+  Elf32_Sym* sym = NULL;
+  if (handle == RTLD_DEFAULT) {
+    sym = dlsym_linear_lookup(symbol, &found, NULL, true);
+  } else if (handle == RTLD_NEXT) {
+    void* ret_addr = __builtin_return_address(0);
+    soinfo* si = find_containing_library(ret_addr, true);
+
+    sym = NULL;
+    if (si && si->next) {
+      sym = dlsym_linear_lookup(symbol, &found, si->next, true);
     }
   } else {
     found = reinterpret_cast<soinfo*>(handle);
@@ -130,7 +174,7 @@ int dladdr(const void* addr, Dl_info* info) {
   ScopedPthreadMutexLocker locker(&gDlMutex);
 
   // Determine if this address can be found in any library currently mapped.
-  soinfo* si = find_containing_library(addr);
+  soinfo* si = find_containing_library(addr, false);
   if (si == NULL) {
     return 0;
   }
@@ -160,13 +204,13 @@ int dlclose(void* handle) {
 //   0000000 00011111 111112 22222222 2333333 3333444444444455555555556666666 6667
 //   0123456 78901234 567890 12345678 9012345 6789012345678901234567890123456 7890
 #define ANDROID_LIBDL_STRTAB \
-    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dl_unwind_find_exidx\0"
+    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dlsym_in_sandbox\0dl_unwind_find_exidx\0"
 
 #elif defined(ANDROID_X86_LINKER) || defined(ANDROID_MIPS_LINKER)
 //   0000000 00011111 111112 22222222 2333333 3333444444444455555555556666666 6667
 //   0123456 78901234 567890 12345678 9012345 6789012345678901234567890123456 7890
 #define ANDROID_LIBDL_STRTAB \
-    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dl_iterate_phdr\0"
+    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0dlopen_in_sandbox\0dlsym_in_sandbox\0dl_iterate_phdr\0"
 #else
 #error Unsupported architecture. Only ARM, MIPS, and x86 are presently supported.
 #endif
@@ -193,10 +237,11 @@ static Elf32_Sym gLibDlSymtab[] = {
   ELF32_SYM_INITIALIZER(29, &dladdr, 1),
   ELF32_SYM_INITIALIZER(36, &android_update_LD_LIBRARY_PATH, 1),
   ELF32_SYM_INITIALIZER(67, &dlopen_in_sandbox, 1),
+  ELF32_SYM_INITIALIZER(85, &dlsym_in_sandbox, 1),
 #if defined(ANDROID_ARM_LINKER)
-  ELF32_SYM_INITIALIZER(85, &dl_unwind_find_exidx, 1),
+  ELF32_SYM_INITIALIZER(102, &dl_unwind_find_exidx, 1),
 #elif defined(ANDROID_X86_LINKER) || defined(ANDROID_MIPS_LINKER)
-  ELF32_SYM_INITIALIZER(85, &dl_iterate_phdr, 1),
+  ELF32_SYM_INITIALIZER(102, &dl_iterate_phdr, 1),
 #endif
 };
 
@@ -219,7 +264,7 @@ static Elf32_Sym gLibDlSymtab[] = {
 // Note that adding any new symbols here requires
 // stubbing them out in libdl.
 static unsigned gLibDlBuckets[1] = { 1 };
-static unsigned gLibDlChains[9] = { 0, 2, 3, 4, 5, 6, 7, 8, 0 };
+static unsigned gLibDlChains[10] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
 
 // This is used by the dynamic linker. Every process gets these symbols for free.
 soinfo libdl_info = {
@@ -236,7 +281,7 @@ soinfo libdl_info = {
     symtab: gLibDlSymtab,
 
     nbucket: 1,
-    nchain: 9,
+    nchain: 10,
     bucket: gLibDlBuckets,
     chain: gLibDlChains,
 
