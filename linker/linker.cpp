@@ -810,10 +810,9 @@ static soinfo* load_library(const char* name) {
     si->dynamic = NULL;
     si->phnum = elf_reader.phdr_count();
     si->phdr = elf_reader.loaded_phdr();
+    si->unused1 = 0;
     return si;
 }
-
-#define SANDBOX_MBs 1
 
 static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     // Open the file.
@@ -843,6 +842,7 @@ static soinfo* load_library_in_sandbox(const char* name, const void* sandbox) {
     si->dynamic = NULL;
     si->phnum = elf_reader.phdr_count();
     si->phdr = elf_reader.loaded_phdr();
+    si->unused1 = 1;
     return si;
 }
 
@@ -941,8 +941,14 @@ static soinfo* find_library(const char* name) {
   return si;
 }
 
+#define LIBC_UNTRUSTED "libc.so\0"
+
 static soinfo* find_library_sandbox(const char* name, const void* sandbox) {
-  soinfo* si = find_library_internal_sandbox(name, sandbox);
+  soinfo* si = NULL;
+  if (!strncmp(name, "libc.so\0", 7))
+    si = find_library_internal_sandbox(LIBC_UNTRUSTED, sandbox);
+  else
+    si = find_library_internal_sandbox(name, sandbox);
   if (si != NULL) {
     si->ref_count++;
   }
@@ -1473,13 +1479,15 @@ void soinfo::CallConstructors() {
       if (d->d_tag == DT_NEEDED) {
         const char* library_name = strtab + d->d_un.d_val;
         TRACE("\"%s\": calling constructors in DT_NEEDED \"%s\"", name, library_name);
-        find_loaded_library(library_name, false)->CallConstructors();
+        find_loaded_library(library_name, unused1 == 1)->CallConstructors();
       }
     }
   }
 
   TRACE("\"%s\": calling constructors", name);
 
+  if (unused1 && !strncmp(name, LIBC_UNTRUSTED, strlen(LIBC_UNTRUSTED)))
+    return;
   // DT_INIT should be called before DT_INIT_ARRAY if both are present.
   CallFunction("DT_INIT", init_func);
   CallArray("DT_INIT_ARRAY", init_array, init_array_count, false);
@@ -1857,6 +1865,7 @@ static void add_vdso(KernelArgumentBlock& args UNUSED) {
     si->phdr = reinterpret_cast<Elf32_Phdr*>(reinterpret_cast<char*>(ehdr_vdso) + ehdr_vdso->e_phoff);
     si->phnum = ehdr_vdso->e_phnum;
     si->link_map.l_name = si->name;
+    si->unused1 = 0;
     for (size_t i = 0; i < si->phnum; ++i) {
         if (si->phdr[i].p_type == PT_LOAD) {
             si->link_map.l_addr = reinterpret_cast<Elf32_Addr>(ehdr_vdso) - si->phdr[i].p_vaddr;
@@ -1919,6 +1928,7 @@ static Elf32_Addr __linker_init_post_relocation(KernelArgumentBlock& args, Elf32
     if (si == NULL) {
         exit(EXIT_FAILURE);
     }
+    si->unused1 = 0;
 
     /* bootstrap the link map, the main exe always needs to be first */
     si->flags |= FLAG_EXE;
@@ -1944,6 +1954,7 @@ static Elf32_Addr __linker_init_post_relocation(KernelArgumentBlock& args, Elf32
         strlcpy(linker_soinfo.name, "/system/bin/linker", sizeof(linker_soinfo.name));
         linker_soinfo.flags = 0;
         linker_soinfo.base = linker_base;
+        linker_soinfo.unused1 = 0;
 
         /*
          * Set the dynamic field in the link map otherwise gdb will complain with
@@ -2099,6 +2110,7 @@ extern "C" Elf32_Addr __linker_init(void* raw_args) {
   linker_so.phdr = phdr;
   linker_so.phnum = elf_hdr->e_phnum;
   linker_so.flags |= FLAG_LINKER;
+  linker_so.unused1 = 0;
 
   if (!soinfo_link_image(&linker_so, false)) {
     // It would be nice to print an error message, but if the linker
