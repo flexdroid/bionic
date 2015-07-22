@@ -90,11 +90,15 @@ static soinfo* sonext = &libdl_info;
 static soinfo* somain; /* main process, always the one after libdl_info */
 
 /* linking untrusted code */
+#define LIBC_UNTRUSTED "libc.so\0"
+
 static struct soinfo_pool_t* gSoInfoPoolsUT = NULL;
 static soinfo* gSoInfoFreeListUT = NULL;
 
 static soinfo* solistUT = NULL;
 static soinfo* sonextUT = NULL;
+
+static soinfo* utm = NULL; /* untrusted malloc */
 
 static const char* const gSoPaths[] = {
   "/vendor/lib",
@@ -372,7 +376,10 @@ static soinfo* soinfo_alloc_sandbox(const char* name, void* addr) {
 
   // Initialize the new element.
   memset(si, 0, sizeof(soinfo));
-  strlcpy(si->name, name, sizeof(si->name));
+  if (!strcmp(name, LIBC_UNTRUSTED))
+      strlcpy(si->name, "libc.so\0", sizeof(si->name));
+  else
+      strlcpy(si->name, name, sizeof(si->name));
   sonextUT->next = si;
   sonextUT = si;
 
@@ -522,7 +529,7 @@ dl_iterate_phdr(int (*cb)(dl_phdr_info *info, size_t size, void *data),
 
 #endif
 
-static Elf32_Sym* soinfo_elf_lookup(soinfo* si, unsigned hash, const char* name) {
+static Elf32_Sym* __soinfo_elf_lookup(soinfo* si, unsigned hash, const char* name) {
     Elf32_Sym* symtab = si->symtab;
     const char* strtab = si->strtab;
 
@@ -548,6 +555,23 @@ static Elf32_Sym* soinfo_elf_lookup(soinfo* si, unsigned hash, const char* name)
     }
 
     return NULL;
+}
+
+static Elf32_Sym* soinfo_elf_lookup(soinfo* si, unsigned hash, const char* name) {
+    if (si->unused1)
+        if (!strcmp(si->name, "libc.so\0")) {
+            if (!strcmp(name, "malloc\0")
+                    || !strcmp(name, "calloc\0")
+                    || !strcmp(name, "realloc\0")
+                    || !strcmp(name, "free\0"))
+            {
+                __libc_format_log(3,"[sandbox]","lookup %s for %s (utm=%p) at %d",
+                        name, si->name, utm, __LINE__);
+                si = utm;
+            }
+        }
+
+    return __soinfo_elf_lookup(si, hash, name);
 }
 
 static unsigned elfhash(const char* _name) {
@@ -918,6 +942,8 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
   if (si == NULL) {
     return NULL;
   }
+  __libc_format_log(3,"[sandbox]","find_library_sandbox %s (%p) at %d",
+          name, sandbox, __LINE__);
 
   // At this point we know that whatever is loaded @ base is a valid ELF
   // shared library whose segments are properly mapped in.
@@ -941,11 +967,9 @@ static soinfo* find_library(const char* name) {
   return si;
 }
 
-#define LIBC_UNTRUSTED "libc.so\0"
-
 static soinfo* find_library_sandbox(const char* name, const void* sandbox) {
   soinfo* si = NULL;
-  if (!strncmp(name, "libc.so\0", 7))
+  if (!strcmp(name, "libc.so\0"))
     si = find_library_internal_sandbox(LIBC_UNTRUSTED, sandbox);
   else
     si = find_library_internal_sandbox(name, sandbox);
@@ -1093,6 +1117,7 @@ soinfo* do_dlopen_in_sandbox(const char* name, int flags, void** psandbox) {
 
   *psandbox = sandbox_section_end;
   sandbox_section_end = (void*)((size_t)sandbox_section_end + PAGE_SIZE);
+
   return si;
 }
 
@@ -1486,7 +1511,7 @@ void soinfo::CallConstructors() {
 
   TRACE("\"%s\": calling constructors", name);
 
-  if (unused1 && !strncmp(name, LIBC_UNTRUSTED, strlen(LIBC_UNTRUSTED)))
+  if (unused1 && !strcmp(name, LIBC_UNTRUSTED))
     return;
   // DT_INIT should be called before DT_INIT_ARRAY if both are present.
   CallFunction("DT_INIT", init_func);
@@ -1768,6 +1793,11 @@ static bool soinfo_link_image(soinfo* si, bool untrusted) {
                         gLdPreloadNames[i], si->name, linker_get_error_buffer());
             }
         }
+    }
+
+    if (untrusted && !utm && !strcmp(si->name, "utm.so\0")) {
+        utm = si;
+        __libc_format_log(3,"[sandbox]","%s is loaded (%p) at %d", si->name, utm, __LINE__);
     }
 
     soinfo** needed = (soinfo**) alloca((1 + needed_count) * sizeof(soinfo*));
