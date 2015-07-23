@@ -921,6 +921,55 @@ LOCAL_SYSTEM_SHARED_LIBRARIES :=
 include $(BUILD_SHARED_LIBRARY)
 
 
+# ========================================================
+# _libc.so
+# ========================================================
+include $(CLEAR_VARS)
+
+# pthread deadlock prediction:
+# set -DPTHREAD_DEBUG -DPTHREAD_DEBUG_ENABLED=1 to enable support for
+# pthread deadlock prediction.
+# Since this code is experimental it is disabled by default.
+# see libc/bionic/pthread_debug.c for details
+
+LOCAL_CFLAGS := $(libc_common_cflags) -std=gnu99 -DPTHREAD_DEBUG -DPTHREAD_DEBUG_ENABLED=0
+LOCAL_C_INCLUDES := $(libc_common_c_includes)
+
+LOCAL_SRC_FILES := \
+	$(libc_arch_dynamic_src_files) \
+	$(libc_static_common_src_files) \
+	custom-malloc/malloc.c
+
+ifeq ($(TARGET_ARCH),arm)
+	LOCAL_NO_CRT := true
+	LOCAL_CFLAGS += -DCRT_LEGACY_WORKAROUND
+
+	LOCAL_SRC_FILES := \
+		arch-arm/bionic/crtbegin_so.c \
+		arch-arm/bionic/atexit_legacy.c \
+		$(LOCAL_SRC_FILES) \
+		arch-arm/bionic/crtend_so.S
+endif
+
+LOCAL_MODULE:= _libc
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
+LOCAL_REQUIRED_MODULES := tzdata
+
+# WARNING: The only library libc.so should depend on is libdl.so!  If you add other libraries,
+# make sure to add -Wl,--exclude-libs=libgcc.a to the LOCAL_LDFLAGS for those libraries.  This
+# ensures that symbols that are pulled into those new libraries from libgcc.a are not declared
+# external; if that were the case, then libc would not pull those symbols from libgcc.a as it
+# should, instead relying on the external symbols from the dependent libraries.  That would
+# create an "cloaked" dependency on libgcc.a in libc though the libraries, which is not what
+# you wanted!
+
+LOCAL_SHARED_LIBRARIES := libdl
+LOCAL_WHOLE_STATIC_LIBRARIES := libc_common
+LOCAL_SYSTEM_SHARED_LIBRARIES :=
+
+include $(BUILD_SHARED_LIBRARY)
+
+
 # For all builds, except for the -user build we will enable memory
 # allocation checking (including memory leaks, buffer overwrites, etc.)
 # Note that all these checks are also controlled by env. settings
