@@ -3,6 +3,11 @@
 #include <linux/err.h>
 #include <machine/asm.h>
 
+#ifdef CUSTOMIZED_MMAP
+ENTRY(munmap)
+    bxls    lr
+END(munmap)
+#else /* CUSTOMIZED_MMAP */
 ENTRY(munmap)
     mov     ip, r7
     ldr     r7, =__NR_munmap
@@ -13,3 +18,4 @@ ENTRY(munmap)
     neg     r0, r0
     b       __set_errno
 END(munmap)
+#endif /* CUSTOMIZED_MMAP */

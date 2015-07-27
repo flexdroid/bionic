@@ -1034,7 +1034,6 @@ void* sandbox_section_alloc(void) {
         : : [end] "r" (sandbox_section_end));
 #endif
   }
-  __libc_format_log(3,"[sandbox]","sandbox_section_end=%p",sandbox_section_end);
   return sandbox_section_end;
 }
 
@@ -1044,7 +1043,6 @@ void* sandbox_mmap(void *addr, size_t length, int prot, int flags,
 {
   if (!(flags & MAP_FIXED))
     sandbox_section_end = (void*)((size_t)sandbox_section_end + ROUND_UP(length, PAGE_SIZE));
-  __libc_format_log(3,"[sandbox]","sandbox_section_end=%p",sandbox_section_end);
   if (addr) {
     void* ret = NULL;
     assert((unsigned long)addr % PAGE_SIZE == 0);

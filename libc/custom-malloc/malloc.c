@@ -782,19 +782,26 @@ void set_external_alloc ( void* ( *allocator )( size_t , size_t* ) ) {
 
 /* for compatibility */
 void* memalign(size_t alignment, size_t byte_count) {
-        return NULL;
+    if (alignment == 1)
+        return malloc(byte_count);
+    void* ptr = malloc(byte_count + alignment - 1);
+    size_t remain = (size_t)ptr % alignment;
+    if (!remain)
+        return ptr;
+    return (void*)((size_t)ptr + alignment - remain);
 }
+
 size_t malloc_usable_size(const void* p) {
-        return 0;
+    return 0;
 }
 
 void* valloc(size_t byte_count)  {
-        return NULL;
+    return NULL;
 }
 void* pvalloc(size_t byte_count) {
-        return NULL;
+    return NULL;
 }
 static struct mallinfo gInfo;
 struct mallinfo mallinfo(void) {
-        return gInfo;
+    return gInfo;
 }

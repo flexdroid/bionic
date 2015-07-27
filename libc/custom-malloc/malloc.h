@@ -137,6 +137,6 @@ void set_malloc_context ( void* new_context );
  */
 void set_external_alloc ( void* ( *allocator )( size_t , size_t* ) );
 
+void* memalign(size_t alignment, size_t byte_count);
 
 #endif /* _MALLOC_H_ */
-
