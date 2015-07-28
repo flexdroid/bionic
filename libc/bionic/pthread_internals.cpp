@@ -63,7 +63,40 @@ __LIBC_ABI_PRIVATE__ void _pthread_internal_add(pthread_internal_t* thread) {
   gThreadList = thread;
 }
 
+#ifdef PTHREAD_UNTRUSTED
+#if defined(__arm__)
+__LIBC_ABI_PRIVATE__ void __do_get_thread(void) {
+  void** tls = reinterpret_cast<void**>(const_cast<void*>(__get_tls()));
+  pthread_internal_t* thd =
+    reinterpret_cast<pthread_internal_t*>(tls[TLS_SLOT_THREAD_ID]);
+  asm volatile(
+      "mov r0, %[ret]\n"
+      "ldr r7, =0x180\n"
+      "svc #0\n"
+      : : [ret] "r" (thd));
+}
+
+__LIBC_ABI_PRIVATE__ pthread_internal_t* __get_thread(void) {
+  pthread_internal_t* thd = NULL;
+  asm volatile(
+      "push {r6, r7}\n"
+      "mov r6, %[addr]\n"
+      "ldr r7, =0x17f\n"
+      "svc #0\n"
+      "mov %[ret], ip\n"
+      "pop {r6, r7}\n"
+      : [ret] "=r" (thd) : [addr] "r" (__do_get_thread));
+  return thd;
+}
+#else /* defined(__arm__) */
 __LIBC_ABI_PRIVATE__ pthread_internal_t* __get_thread(void) {
   void** tls = reinterpret_cast<void**>(const_cast<void*>(__get_tls()));
   return reinterpret_cast<pthread_internal_t*>(tls[TLS_SLOT_THREAD_ID]);
 }
+#endif /* defined(__arm__) */
+#else /* PTHREAD_UNTRUSTED */
+__LIBC_ABI_PRIVATE__ pthread_internal_t* __get_thread(void) {
+  void** tls = reinterpret_cast<void**>(const_cast<void*>(__get_tls()));
+  return reinterpret_cast<pthread_internal_t*>(tls[TLS_SLOT_THREAD_ID]);
+}
+#endif /* PTHREAD_UNTRUSTED */

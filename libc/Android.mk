@@ -816,6 +816,49 @@ include $(BUILD_STATIC_LIBRARY)
 
 
 # ========================================================
+# _libc_bionic.a - home-grown C library code
+# ========================================================
+#
+include $(CLEAR_VARS)
+
+LOCAL_SRC_FILES := $(libc_bionic_src_files)
+LOCAL_CFLAGS := $(libc_common_cflags) -Werror -DPTHREAD_UNTRUSTED
+LOCAL_C_INCLUDES := $(libc_common_c_includes)
+LOCAL_MODULE := _libc_bionic
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
+LOCAL_SYSTEM_SHARED_LIBRARIES :=
+
+include $(BUILD_STATIC_LIBRARY)
+
+
+# ========================================================
+# _libc_common.a
+# ========================================================
+
+include $(CLEAR_VARS)
+
+LOCAL_SRC_FILES := $(libc_common_src_files)
+LOCAL_CFLAGS := $(libc_common_cflags) \
+    -std=gnu99 \
+    -I$(LOCAL_PATH)/upstream-netbsd/libc/include # for netbsd private headers
+LOCAL_C_INCLUDES := $(libc_common_c_includes)
+LOCAL_MODULE := _libc_common
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
+LOCAL_WHOLE_STATIC_LIBRARIES := \
+    libbionic_ssp \
+    _libc_bionic \
+    libc_freebsd \
+    libc_netbsd \
+    libc_tzcode
+LOCAL_SYSTEM_SHARED_LIBRARIES :=
+
+# TODO: split out the asflags.
+LOCAL_ASFLAGS := $(LOCAL_CFLAGS)
+
+include $(BUILD_STATIC_LIBRARY)
+
+
+# ========================================================
 # libc_nomalloc.a
 # ========================================================
 #
@@ -964,7 +1007,7 @@ LOCAL_REQUIRED_MODULES := tzdata
 # you wanted!
 
 LOCAL_SHARED_LIBRARIES := libdl
-LOCAL_WHOLE_STATIC_LIBRARIES := libc_common
+LOCAL_WHOLE_STATIC_LIBRARIES := _libc_common
 LOCAL_SYSTEM_SHARED_LIBRARIES :=
 
 include $(BUILD_SHARED_LIBRARY)
