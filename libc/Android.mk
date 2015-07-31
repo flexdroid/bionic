@@ -981,7 +981,8 @@ LOCAL_C_INCLUDES := $(libc_common_c_includes)
 LOCAL_SRC_FILES := \
 	$(libc_arch_dynamic_src_files) \
 	$(libc_static_common_src_files) \
-	bionic/custom-malloc.cpp
+	bionic/custom-malloc.cpp \
+	bionic/malloc_debug_common.cpp
 
 ifeq ($(TARGET_ARCH),arm)
 	LOCAL_NO_CRT := true

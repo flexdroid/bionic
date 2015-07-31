@@ -46,7 +46,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#ifdef PTHREAD_UNTRUSTED
+#include "custom-malloc.h"
+#else
 #include "dlmalloc.h"
+#endif
 #include "ScopedPthreadMutexLocker.h"
 
 /*
@@ -103,6 +107,106 @@ static int hash_entry_compare(const void* arg1, const void* arg2) {
     return result;
 }
 
+#ifdef PTHREAD_UNTRUSTED
+/*
+ * Retrieve native heap information.
+ *
+ * "*info" is set to a buffer we allocate
+ * "*overallSize" is set to the size of the "info" buffer
+ * "*infoSize" is set to the size of a single entry
+ * "*totalMemory" is set to the sum of all allocations we're tracking; does
+ *   not include heap overhead
+ * "*backtraceSize" is set to the maximum number of entries in the back trace
+ */
+extern "C" void get_malloc_leak_info(uint8_t** info, size_t* overallSize,
+        size_t* infoSize, size_t* totalMemory, size_t* backtraceSize) {
+    // don't do anything if we have invalid arguments
+    if (info == NULL || overallSize == NULL || infoSize == NULL ||
+            totalMemory == NULL || backtraceSize == NULL) {
+        return;
+    }
+    *totalMemory = 0;
+
+    ScopedPthreadMutexLocker locker(&gAllocationsMutex);
+
+    if (gHashTable.count == 0) {
+        *info = NULL;
+        *overallSize = 0;
+        *infoSize = 0;
+        *backtraceSize = 0;
+        return;
+    }
+
+    HashEntry** list = static_cast<HashEntry**>(ut_malloc(sizeof(void*) * gHashTable.count));
+
+    // get the entries into an array to be sorted
+    int index = 0;
+    for (size_t i = 0 ; i < HASHTABLE_SIZE ; ++i) {
+        HashEntry* entry = gHashTable.slots[i];
+        while (entry != NULL) {
+            list[index] = entry;
+            *totalMemory = *totalMemory +
+                ((entry->size & ~SIZE_FLAG_MASK) * entry->allocations);
+            index++;
+            entry = entry->next;
+        }
+    }
+
+    // XXX: the protocol doesn't allow variable size for the stack trace (yet)
+    *infoSize = (sizeof(size_t) * 2) + (sizeof(uintptr_t) * BACKTRACE_SIZE);
+    *overallSize = *infoSize * gHashTable.count;
+    *backtraceSize = BACKTRACE_SIZE;
+
+    // now get a byte array big enough for this
+    *info = static_cast<uint8_t*>(ut_malloc(*overallSize));
+
+    if (*info == NULL) {
+        *overallSize = 0;
+        ut_free(list);
+        return;
+    }
+
+    qsort(list, gHashTable.count, sizeof(void*), hash_entry_compare);
+
+    uint8_t* head = *info;
+    const int count = gHashTable.count;
+    for (int i = 0 ; i < count ; ++i) {
+        HashEntry* entry = list[i];
+        size_t entrySize = (sizeof(size_t) * 2) + (sizeof(uintptr_t) * entry->numEntries);
+        if (entrySize < *infoSize) {
+            /* we're writing less than a full entry, clear out the rest */
+            memset(head + entrySize, 0, *infoSize - entrySize);
+        } else {
+            /* make sure the amount we're copying doesn't exceed the limit */
+            entrySize = *infoSize;
+        }
+        memcpy(head, &(entry->size), entrySize);
+        head += *infoSize;
+    }
+
+    ut_free(list);
+}
+
+extern "C" void free_malloc_leak_info(uint8_t* info) {
+    ut_free(info);
+}
+
+extern "C" struct mallinfo mallinfo() {
+    return ut_mallinfo();
+}
+
+extern "C" void* valloc(size_t bytes) {
+    return ut_valloc(bytes);
+}
+
+extern "C" void* pvalloc(size_t bytes) {
+    return ut_pvalloc(bytes);
+}
+
+extern "C" int posix_memalign(void** memptr, size_t alignment, size_t size) {
+    return ut_posix_memalign(memptr, alignment, size);
+}
+#else   // PTHREAD_UNTRUSTED
 /*
  * Retrieve native heap information.
  *
@@ -201,6 +305,7 @@ extern "C" void* pvalloc(size_t bytes) {
 extern "C" int posix_memalign(void** memptr, size_t alignment, size_t size) {
     return dlposix_memalign(memptr, alignment, size);
 }
+#endif  // PTHREAD_UNTRUSTED
 
 /* Support for malloc debugging.
  * Note that if USE_DL_PREFIX is not defined, it's assumed that memory
@@ -502,6 +607,40 @@ static pthread_once_t  malloc_fini_once_ctl = PTHREAD_ONCE_INIT;
 
 #endif  // !LIBC_STATIC
 #endif  // USE_DL_PREFIX
+
+#ifdef PTHREAD_UNTRUSTED
+extern const MallocDebug __libc_malloc_default_dispatch;
+const MallocDebug __libc_malloc_default_dispatch __attribute__((aligned(32))) =
+{
+    ut_malloc, ut_free, ut_calloc, ut_realloc, ut_memalign, ut_malloc_usable_size,
+};
+
+const MallocDebug* __libc_malloc_dispatch = &__libc_malloc_default_dispatch;
+
+extern "C" void* malloc(size_t bytes) {
+    return __libc_malloc_dispatch->malloc(bytes);
+}
+
+extern "C" void free(void* mem) {
+    __libc_malloc_dispatch->free(mem);
+}
+
+extern "C" void* calloc(size_t n_elements, size_t elem_size) {
+    return __libc_malloc_dispatch->calloc(n_elements, elem_size);
+}
+
+extern "C" void* realloc(void* oldMem, size_t bytes) {
+    return __libc_malloc_dispatch->realloc(oldMem, bytes);
+}
+
+extern "C" void* memalign(size_t alignment, size_t bytes) {
+    return __libc_malloc_dispatch->memalign(alignment, bytes);
+}
+
+extern "C" size_t malloc_usable_size(const void* mem) {
+    return __libc_malloc_dispatch->malloc_usable_size(mem);
+}
+#endif  // PTHREAD_UNTRUSTED
 
 /* Initializes memory allocation framework.
  * This routine is called from __libc_init routines implemented
