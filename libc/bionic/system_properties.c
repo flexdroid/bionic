@@ -118,7 +118,7 @@ size_t pa_size;
 
 #ifdef PTHREAD_UNTRUSTED
 #define SECTION_SIZE (1 << 20) // 1 MB
-#define CUSTOMIZED_MMAP_SIZE (128 * SECTION_SIZE)
+#define CUSTOMIZED_MMAP_SIZE (2 * SECTION_SIZE)
 #define MODULAR(ptr, size) ((unsigned long)(ptr) % size)
 #define ROUND_UP(ptr, size) \
   (MODULAR(ptr, size) ? \
@@ -134,17 +134,18 @@ static void* __init(void) {
       munmap(__base, (unsigned long)__end - (unsigned long)__base);
 
     /* because of mmap bug .. check allocation */
-    for (size_t i = 0; i < 127; ++i) {
+    for (size_t i = 0; i < 1; ++i) {
       *(int*)((size_t)__end+i*SECTION_SIZE) = 3;
     }
 
 #if defined(__arm__)
     asm volatile(
-        "push {r0, r7}\n"
+        "push {r0, r1, r7}\n"
         "mov r0, %[end]\n"
+        "mov r1, #1\n"
         "ldr r7, =0x17e\n"
         "svc #0\n"
-        "pop {r0, r7}\n"
+        "pop {r0, r1, r7}\n"
         : : [end] "r" (__end));
 #endif
   }

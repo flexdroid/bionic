@@ -1026,11 +1026,12 @@ void* sandbox_section_alloc(void) {
 
 #if defined(__arm__)
     asm volatile(
-        "push {r0, r7}\n"
+        "push {r0, r1, r7}\n"
         "mov r0, %[end]\n"
+        "mov r1, #127\n"
         "ldr r7, =0x17e\n"
         "svc #0\n"
-        "pop {r0, r7}\n"
+        "pop {r0, r1, r7}\n"
         : : [end] "r" (sandbox_section_end));
 #endif
   }
