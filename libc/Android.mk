@@ -838,7 +838,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := $(libc_common_src_files)
-LOCAL_CFLAGS := $(libc_common_cflags) \
+LOCAL_CFLAGS := $(libc_common_cflags) -DPTHREAD_UNTRUSTED \
     -std=gnu99 \
     -I$(LOCAL_PATH)/upstream-netbsd/libc/include # for netbsd private headers
 LOCAL_C_INCLUDES := $(libc_common_c_includes)

@@ -116,6 +116,59 @@ prop_area *__system_property_area__ = NULL;
 size_t pa_data_size;
 size_t pa_size;
 
+#ifdef PTHREAD_UNTRUSTED
+#define SECTION_SIZE (1 << 20) // 1 MB
+#define CUSTOMIZED_MMAP_SIZE (128 * SECTION_SIZE)
+#define MODULAR(ptr, size) ((unsigned long)(ptr) % size)
+#define ROUND_UP(ptr, size) \
+  (MODULAR(ptr, size) ? \
+   (unsigned long)(ptr) - MODULAR(ptr, size) + size : (unsigned long)(ptr))
+static void* __base = NULL;
+static void* __end = NULL;
+static void* __init(void) {
+  if (__base == NULL) {
+    __base = mmap(NULL, CUSTOMIZED_MMAP_SIZE,
+        PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    __end = (void*)ROUND_UP(__base, SECTION_SIZE);
+    if (__end > __base)
+      munmap(__base, (unsigned long)__end - (unsigned long)__base);
+
+    /* because of mmap bug .. check allocation */
+    for (size_t i = 0; i < 127; ++i) {
+      *(int*)((size_t)__end+i*SECTION_SIZE) = 3;
+    }
+
+#if defined(__arm__)
+    asm volatile(
+        "push {r0, r7}\n"
+        "mov r0, %[end]\n"
+        "ldr r7, =0x17e\n"
+        "svc #0\n"
+        "pop {r0, r7}\n"
+        : : [end] "r" (__end));
+#endif
+  }
+  return __end;
+}
+
+static void* mmap_wrapper(size_t length, int prot,
+        int flags, int fd, off_t offset)
+{
+  void* ret;
+  int mret;
+  if (!__end) __init();
+  ret = __end;
+  __end = (void*)((size_t)__end + ROUND_UP(length, PAGE_SIZE));
+  if (fd > 2) {
+    ret = mmap(ret, length, prot, MAP_FIXED | flags, fd, offset);
+  } else {
+    mret = mprotect(ret, length, prot);
+    if (mret == -1) abort();
+  }
+  return ret;
+}
+#endif // PTHREAD_UNTRUSTED
+
 static int get_fd_from_env(void)
 {
     char *env = getenv("ANDROID_PROPERTY_WORKSPACE");
@@ -159,7 +212,11 @@ static int map_prop_area_rw()
     pa_data_size = pa_size - sizeof(prop_area);
     compat_mode = false;
 
+#ifdef PTHREAD_UNTRUSTED
+    pa = mmap_wrapper(pa_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+#else // PTHREAD_UNTRUSTED
     pa = mmap(NULL, pa_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+#endif // PTHREAD_UNTRUSTED
     if(pa == MAP_FAILED)
         goto out;
 
@@ -242,7 +299,11 @@ static int map_prop_area()
 
     pa_size = fd_stat.st_size;
     pa_data_size = pa_size - sizeof(prop_area);
+#ifdef PTHREAD_UNTRUSTED
+    prop_area *pa = mmap_wrapper(pa_size, PROT_READ, MAP_SHARED, fd, 0);
+#else // PTHREAD_UNTRUSTED
     prop_area *pa = mmap(NULL, pa_size, PROT_READ, MAP_SHARED, fd, 0);
+#endif // PTHREAD_UNTRUSTED
 
     if (pa == MAP_FAILED) {
         goto cleanup;
@@ -432,9 +493,18 @@ static const prop_info *find_property(prop_bt *trie, const char *name,
 
 const prop_info *__system_property_find(const char *name)
 {
+#ifdef PTHREAD_UNTRUSTED
+    int init_ret;
+#endif // PTHREAD_UNTRUSTED
     if (__predict_false(compat_mode)) {
         return __system_property_find_compat(name);
     }
+#ifdef PTHREAD_UNTRUSTED
+    if (!__system_property_area__) {
+        init_ret = __system_properties_init();
+        if (init_ret < 0) abort();
+    }
+#endif // PTHREAD_UNTRUSTED
     return find_property(root_node(), name, strlen(name), NULL, 0, false);
 }
 
