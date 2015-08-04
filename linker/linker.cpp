@@ -921,8 +921,10 @@ static soinfo* find_library_internal_sandbox(const char* name, const void* sandb
   if (si == NULL) {
     return NULL;
   }
+#if 0
   __libc_format_log(3,"[sandbox]","find_library_sandbox %s (%p) at %d",
           name, sandbox, __LINE__);
+#endif
 
   // At this point we know that whatever is loaded @ base is a valid ELF
   // shared library whose segments are properly mapped in.

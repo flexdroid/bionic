@@ -303,8 +303,6 @@ bool ElfReader::ReserveAddressSpace() {
   uint8_t* addr = reinterpret_cast<uint8_t*>(min_vaddr);
   int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
   void* start = __mmap(sandbox_, addr, load_size_, PROT_NONE, mmap_flags, -1, 0);
-  if (sandbox_)
-    __libc_format_log(3,"[sandbox]","start = %p, load_size_ = %d", start, (int)load_size_);
   if (start == MAP_FAILED) {
     DL_ERR("couldn't reserve %d bytes of address space for \"%s\"", load_size_, name_);
     return false;
@@ -353,9 +351,6 @@ bool ElfReader::LoadSegments() {
                             MAP_FIXED|MAP_PRIVATE,
                             fd_,
                             file_page_start);
-      if (sandbox_)
-        __libc_format_log(3,"[sandbox]","seg_addr = %p, seg_page_start = %p, len = %d",
-            seg_addr, (void*)seg_page_start, (unsigned int)(file_length));
       if (seg_addr == MAP_FAILED) {
         DL_ERR("couldn't map \"%s\" segment %d: %s", name_, i, strerror(errno));
         return false;
@@ -384,9 +379,6 @@ bool ElfReader::LoadSegments() {
                            MAP_FIXED|MAP_ANONYMOUS|MAP_PRIVATE,
                            -1,
                            0);
-      if (sandbox_)
-        __libc_format_log(3,"[sandbox]","zeromap = %p, seg_file_end = %p",
-            zeromap, (void*)seg_file_end);
       if (zeromap == MAP_FAILED) {
         DL_ERR("couldn't zero fill \"%s\" gap: %s", name_, strerror(errno));
         return false;
