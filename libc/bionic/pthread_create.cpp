@@ -56,6 +56,10 @@ static pthread_mutex_t gPthreadStackCreationLock = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_mutex_t gDebuggerNotificationLock = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(PTHREAD_UNTRUSTED) && defined(__arm__)
+static void free_stack(void* ptr);
+#endif
+
 void  __init_tls(pthread_internal_t* thread) {
   // Zero-initialize all the slots.
   for (size_t i = 0; i < BIONIC_TLS_SLOTS; ++i) {
@@ -99,10 +103,16 @@ extern "C" void __thread_entry(void* (*func)(void*), void* arg, void** tls) {
   __init_tls(thread);
 
   if ((thread->internal_flags & kPthreadInitFailed) != 0) {
+#if defined(PTHREAD_UNTRUSTED) && defined(__arm__)
+    free_stack(thread->attr.stack_base);
+#endif
     pthread_exit(NULL);
   }
 
   void* result = func(arg);
+#if defined(PTHREAD_UNTRUSTED) && defined(__arm__)
+  free_stack(thread->attr.stack_base);
+#endif
   pthread_exit(result);
 }
 
@@ -132,6 +142,61 @@ int _init_thread(pthread_internal_t* thread, bool add_to_thread_list) {
   return error;
 }
 
+#if defined(PTHREAD_UNTRUSTED) && defined(__arm__)
+#define SECTION_SIZE (1<<20)
+#define STACK_SIZE (1*SECTION_SIZE)
+#define NUM_STACK 32
+#define MODULAR(ptr, size) ((unsigned long)(ptr) % size)
+#define ROUND_UP(ptr, size) \
+  (MODULAR(ptr, size) ? \
+   (unsigned long)(ptr) - MODULAR(ptr, size) + size : (unsigned long)(ptr))
+static void* ut_stack_base = NULL;
+static bool ut_stack_used[NUM_STACK] = {0};
+static void* alloc_stack(void) {
+  unsigned long i;
+  if (!ut_stack_base) {
+    void* base = mmap(NULL, NUM_STACK*STACK_SIZE,
+        PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+      __libc_format_log(ANDROID_LOG_WARN,
+          "libc",
+          "pthread_create mmap failed stack: %s",
+          strerror(errno));
+      return NULL;
+    }
+    ut_stack_base = (void*)ROUND_UP(base, SECTION_SIZE);
+    if (base < ut_stack_base)
+      munmap(base, (unsigned long)ut_stack_base - (unsigned long)base);
+    for (i = 0; i < 31; ++i) {
+      *(int *)((unsigned long)ut_stack_base + i*SECTION_SIZE) = 3;
+    }
+    for (i = 0; i < NUM_STACK; ++i) {
+      ut_stack_used[i] = false;
+    }
+    asm volatile(
+        "push {r0, r7}\n"
+        "mov r0, %[base]\n"
+        "mov r1, #31\n"
+        "ldr r7, =0x17e\n"
+        "svc #0\n"
+        "pop {r0, r7}\n"
+        : : [base] "r" (ut_stack_base));
+  }
+  for (i = 0; i < NUM_STACK && ut_stack_used[i]; ++i) ;
+  ut_stack_used[i] = true;
+  return (void *)((unsigned long)ut_stack_base + i*STACK_SIZE);
+}
+
+static void free_stack(void* ptr) {
+  unsigned long i = ((unsigned long)ptr - (unsigned long)ut_stack_base)/STACK_SIZE;
+  ut_stack_used[i] = false;
+}
+
+static void* __create_thread_stack(pthread_internal_t* thread __attribute__((unused))) {
+  ScopedPthreadMutexLocker lock(&gPthreadStackCreationLock);
+  return alloc_stack();
+}
+#else // defined(PTHREAD_UNTRUSTED) && defined(__arm__)
 static void* __create_thread_stack(pthread_internal_t* thread) {
   ScopedPthreadMutexLocker lock(&gPthreadStackCreationLock);
 
@@ -158,6 +223,7 @@ static void* __create_thread_stack(pthread_internal_t* thread) {
 
   return stack;
 }
+#endif // defined(PTHREAD_UNTRUSTED) && defined(__arm__)
 
 int pthread_create(pthread_t* thread_out, pthread_attr_t const* attr,
                    void* (*start_routine)(void*), void* arg) {
