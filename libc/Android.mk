@@ -932,7 +932,8 @@ LOCAL_SRC_FILES := \
 	bionic/dlmalloc.c \
 	bionic/malloc_debug_common.cpp \
 	bionic/pthread_debug.cpp \
-	bionic/libc_init_dynamic.cpp
+	bionic/libc_init_dynamic.cpp \
+	bionic/libc_untrusted_helper.cpp
 
 ifeq ($(TARGET_ARCH),arm)
 	LOCAL_NO_CRT := true
@@ -982,7 +983,8 @@ LOCAL_SRC_FILES := \
 	$(libc_arch_dynamic_src_files) \
 	$(libc_static_common_src_files) \
 	bionic/custom-malloc.cpp \
-	bionic/malloc_debug_common.cpp
+	bionic/malloc_debug_common.cpp \
+	bionic/libc_untrusted_helper.cpp
 
 ifeq ($(TARGET_ARCH),arm)
 	LOCAL_NO_CRT := true

@@ -119,10 +119,12 @@ void __libc_init_common(KernelArgumentBlock& args) {
   // AT_RANDOM is a pointer to 16 bytes of randomness on the stack.
   __stack_chk_guard = *reinterpret_cast<uintptr_t*>(getauxval(AT_RANDOM));
 
+#if !defined(PTHREAD_UNTRUSTED)
   // Get the main thread from TLS and add it to the thread list.
   pthread_internal_t* main_thread = __get_thread();
   main_thread->allocated_on_heap = false;
   _pthread_internal_add(main_thread);
+#endif
 
   __system_properties_init(); // Requires 'environ'.
 }

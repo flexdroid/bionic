@@ -53,11 +53,13 @@
 #include "libc_init_common.h"
 #include <bionic_tls.h>
 
+#if !defined(PTHREAD_UNTRUSTED)
 extern "C" {
   extern void pthread_debug_init(void);
   extern void malloc_debug_init(void);
   extern void malloc_debug_fini(void);
 };
+#endif
 
 // We flag the __libc_preinit function as a constructor to ensure
 // that its address is listed in libc.so's .init_array section.
@@ -75,11 +77,14 @@ __attribute__((constructor)) static void __libc_preinit() {
 
   __libc_init_common(*args);
 
+#if !defined(PTHREAD_UNTRUSTED)
   // Hooks for the debug malloc and pthread libraries to let them know that we're starting up.
   pthread_debug_init();
   malloc_debug_init();
+#endif
 }
 
+#if !defined(PTHREAD_UNTRUSTED)
 __LIBC_HIDDEN__ void __libc_postfini() {
   // A hook for the debug malloc library to let it know that we're shutting down.
   malloc_debug_fini();
@@ -111,3 +116,4 @@ __noreturn void __libc_init(void* raw_args,
 
   exit(slingshot(args.argc, args.argv, args.envp));
 }
+#endif
