@@ -374,6 +374,8 @@ static soinfo* soinfo_alloc_sandbox(const char* name, void* addr) {
   memset(si, 0, sizeof(soinfo));
   if (addr && !strcmp(name, "_libc.so\0"))
     strlcpy(si->name, "libc.so\0", sizeof(si->name));
+  else if (addr && !strcmp(name, "_libbinder.so\0"))
+    strlcpy(si->name, "libbinder.so\0", sizeof(si->name));
   else
     strlcpy(si->name, name, sizeof(si->name));
   sonextUT->next = si;

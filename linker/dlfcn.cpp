@@ -72,7 +72,11 @@ void* dlopen(const char* filename, int flags) {
 
 void* dlopen_in_sandbox(const char* filename, int flags, void** psandbox) {
   ScopedPthreadMutexLocker locker(&gDlMutex);
-  soinfo* result = do_dlopen_in_sandbox(filename, flags, psandbox);
+  soinfo* result = NULL;
+  if (!strcmp(filename, "libbinder.so\0"))
+    result = do_dlopen_in_sandbox("_libbinder.so\0", flags, psandbox);
+  else
+    result = do_dlopen_in_sandbox(filename, flags, psandbox);
   if (result == NULL) {
     __bionic_format_dlerror("dlopen failed", linker_get_error_buffer());
     return NULL;
