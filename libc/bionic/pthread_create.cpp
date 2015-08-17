@@ -152,36 +152,38 @@ int _init_thread(pthread_internal_t* thread, bool add_to_thread_list) {
    (unsigned long)(ptr) - MODULAR(ptr, size) + size : (unsigned long)(ptr))
 static void* ut_stack_base = NULL;
 static bool ut_stack_used[NUM_STACK] = {0};
+__attribute__((constructor)) static void __utlibc_pthread_stack(void) {
+  unsigned long i;
+  void* base = mmap(NULL, NUM_STACK*STACK_SIZE,
+      PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
+  if (base == MAP_FAILED) {
+    __libc_format_log(ANDROID_LOG_WARN,
+        "libc",
+        "pthread_create mmap failed stack: %s",
+        strerror(errno));
+    return;
+  }
+  ut_stack_base = (void*)ROUND_UP(base, SECTION_SIZE);
+  if (base < ut_stack_base)
+    munmap(base, (unsigned long)ut_stack_base - (unsigned long)base);
+  for (i = 0; i < 31; ++i) {
+    *(int *)((unsigned long)ut_stack_base + i*SECTION_SIZE) = 3;
+  }
+  for (i = 0; i < NUM_STACK; ++i) {
+    ut_stack_used[i] = false;
+  }
+  asm volatile(
+      "push {r0, r1, r7}\n"
+      "mov r0, %[base]\n"
+      "mov r1, #31\n"
+      "ldr r7, =0x17e\n"
+      "svc #0\n"
+      "pop {r0, r1, r7}\n"
+      : : [base] "r" (ut_stack_base));
+}
+
 static void* alloc_stack(void) {
   unsigned long i;
-  if (!ut_stack_base) {
-    void* base = mmap(NULL, NUM_STACK*STACK_SIZE,
-        PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
-    if (base == MAP_FAILED) {
-      __libc_format_log(ANDROID_LOG_WARN,
-          "libc",
-          "pthread_create mmap failed stack: %s",
-          strerror(errno));
-      return NULL;
-    }
-    ut_stack_base = (void*)ROUND_UP(base, SECTION_SIZE);
-    if (base < ut_stack_base)
-      munmap(base, (unsigned long)ut_stack_base - (unsigned long)base);
-    for (i = 0; i < 31; ++i) {
-      *(int *)((unsigned long)ut_stack_base + i*SECTION_SIZE) = 3;
-    }
-    for (i = 0; i < NUM_STACK; ++i) {
-      ut_stack_used[i] = false;
-    }
-    asm volatile(
-        "push {r0, r7}\n"
-        "mov r0, %[base]\n"
-        "mov r1, #31\n"
-        "ldr r7, =0x17e\n"
-        "svc #0\n"
-        "pop {r0, r7}\n"
-        : : [base] "r" (ut_stack_base));
-  }
   for (i = 0; i < NUM_STACK && ut_stack_used[i]; ++i) ;
   ut_stack_used[i] = true;
   return (void *)((unsigned long)ut_stack_base + i*STACK_SIZE);
